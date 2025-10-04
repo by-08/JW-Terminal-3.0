@@ -439,10 +439,6 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
                             else:
                                 signal = 'No'
                     
-                    # Adjust JW % for Bearish
-                    if mode == 'Bearish':
-                        close_pct = 100 - close_pct
-                    
                     # Print for backtest
                     if full_data is not None and current_date is not None:
                         print(f"{ticker}, {current_date.strftime('%Y-%m-%d')}, {close_pct:.2f}, {open_pct:.2f}")
@@ -706,7 +702,7 @@ def style_df(df, minimalist):
         subset['30D Avg Vol'] = subset['30D Avg Vol'].apply(lambda v: f"{v/1000000:.2f} M" if isinstance(v, (int, float)) and v > 0 else "0.00 M")
 
     if 'Date' in df.columns:  # backtest mode
-        display_columns = ['Date', 'Ticker', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'JW Signal', 'Strength', 'Days Held', 'Win/Loss', 'PnL $', 'PnL %', 'Take Profit Target Price', 'Stop Loss Price']
+        display_columns = ['Date', 'Ticker', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'JW Signal', 'Strength', 'Days Held', 'Win/Loss', 'PnL']
         subset = subset[display_columns]
     else:  # live scan
         if minimalist:
@@ -720,24 +716,20 @@ def style_df(df, minimalist):
             display_columns = ['Ticker', 'Open', 'High', 'Low', close_col, 'Volume', '30D Avg Vol', 'rVolume', 'rVolatility', 'JW %', jw_col, 'Strength']
             subset = subset.reindex(columns=[c for c in display_columns if c in subset.columns])
 
-    float_cols = ['Open', 'High', 'Low', 'Close', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'Strength', 'PnL $', 'Take Profit Target Price', 'Stop Loss Price']
+    float_cols = ['Open', 'High', 'Low', 'Close', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'Strength', 'PnL']
     format_dict = {col: '{:.2f}' for col in float_cols if col in subset.columns}
 
-    # Format PnL columns
-    if 'PnL %' in subset.columns:
-        format_dict['PnL %'] = '{:.1f}%'
-    if 'PnL $' in subset.columns:
-        format_dict['PnL $'] = '{:.2f}'
+    # Format PnL columns with %
+    if 'PnL' in subset.columns:
+        format_dict['PnL'] = '{:.2f}%'
 
     subset = subset.style.format(format_dict)
 
     # Apply styling to Strength column
     subset = subset.applymap(highlight_strength, subset=pd.IndexSlice[:, ['Strength']])
     # For backtest, highlight PnL if present
-    pnl_cols = ['PnL $', 'PnL %']
-    for col in pnl_cols:
-        if col in df.columns:
-            subset = subset.applymap(highlight_pnl, subset=pd.IndexSlice[:, [col]])
+    if 'PnL' in df.columns:
+        subset = subset.applymap(highlight_pnl, subset=pd.IndexSlice[:, ['PnL']])
     
     # Highlight JW Signal
     if 'JW Signal' in subset.columns:
@@ -842,8 +834,8 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw
                     hit = False
                     dir = 1 if mode == 'Bullish' else -1
                     for i, bar in enumerate(forward_bars.itertuples(index=False)):
-                        hit_tp = tp_price is not None and ((mode == 'Bullish' and bar.High >= tp_price) or (mode == 'Bearish' and bar.Low <= tp_price))
                         hit_sl = sl_price is not None and ((mode == 'Bullish' and bar.Low <= sl_price) or (mode == 'Bearish' and bar.High >= sl_price))
+                        hit_tp = tp_price is not None and ((mode == 'Bullish' and bar.High >= tp_price) or (mode == 'Bearish' and bar.Low <= tp_price))
                         if hit_tp:
                             hit_day = i + 1
                             exit_price = tp_price
@@ -865,20 +857,16 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw
                         outcome = 'Win' if pnl_temp > 0 else 'Loss'
                         hit_day = len(forward_bars)
                     
-                    pnl_dollar = dir * (exit_price - entry_c)
-                    pnl_percent = (pnl_dollar / entry_c) * 100
+                    pnl = dir * (exit_price - entry_c) / entry_c * 100
                     
                     all_signals.append({
                         'Ticker': ticker,
                         'Signal_Date': date,
                         'Mode': mode,
                         'Entry_Close': entry_c,
-                        'PnL_$': pnl_dollar,
-                        'PnL_%': pnl_percent,
+                        'PnL': pnl,
                         'Days_Held': hit_day,
                         'Outcome': outcome,
-                        'TP_Price': tp_price,
-                        'SL_Price': sl_price,
                         'rVolume': signal['rVolume'],
                         'Strength': signal['Strength'],
                         'JW_Percent': signal['JW %'],
@@ -911,7 +899,7 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw
         max_dd = 0.0
     else:
         win_rate = (df_bt['Outcome'] == 'Win').mean() * 100
-        pnls = df_bt['PnL_%']
+        pnls = df_bt['PnL']
         avg_pnl = pnls.mean()
         sharpe = avg_pnl / (pnls.std() + 1e-8)
         cum_returns = np.cumsum(pnls - avg_pnl)
@@ -1112,7 +1100,7 @@ with tab2:
             # Table
             if not df_bt.empty:
                 # Rename columns
-                df_display = df_bt.rename(columns={'Signal_Date': 'Date', 'JW_Percent': 'JW %', 'Mode': 'JW Signal', 'Entry_Close': 'Close Price', 'Days_Held': 'Days Held', 'Outcome': 'Win/Loss', 'PnL_$': 'PnL $', 'PnL_%': 'PnL %', 'TP_Price': 'Take Profit Target Price', 'SL_Price': 'Stop Loss Price'})
+                df_display = df_bt.rename(columns={'Signal_Date': 'Date', 'JW_Percent': 'JW %', 'Mode': 'JW Signal', 'Entry_Close': 'Close Price', 'Days_Held': 'Days Held', 'Outcome': 'Win/Loss'})
                 df_display = df_display.sort_values('Strength', ascending=False)
                 styled_bt = style_df(df_display, minimalist)
                 st.dataframe(styled_bt, use_container_width=True, hide_index=True)
@@ -1126,8 +1114,8 @@ with tab2:
                     col_chart1, col_chart2 = st.columns(2)
                     with col_chart1:
                         # Avg P&L
-                        if 'PnL_%' in df_bt.columns:
-                            avg_pnl = df_bt['PnL_%'].mean()
+                        if 'PnL' in df_bt.columns:
+                            avg_pnl = df_bt['PnL'].mean()
                             fig_pnl = px.bar(x=['PnL'], y=[avg_pnl], title="Avg P&L")
                             fig_pnl.add_hline(y=0, line_dash="dash", line_color="red")
                             st.plotly_chart(fig_pnl, use_container_width=True)
