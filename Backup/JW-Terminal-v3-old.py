@@ -1,8 +1,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta, date
-from calendar import monthrange
+from datetime import datetime, timedelta
 import json
 import os
 import io
@@ -10,8 +9,6 @@ import subprocess
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import requests  # Added for GitHub download
-import hashlib  # For file hash check
 
 # Page config
 st.set_page_config(page_title="John Wick Terminal", layout="wide", initial_sidebar_state="collapsed")
@@ -215,6 +212,28 @@ st.markdown("""
 st.markdown("<h1 style='text-align: center; color: lime; font-family: \"Courier New\", monospace; font-size: 16px; font-weight: bold; margin-bottom: 0;'>JOHN WICK TERMINAL</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: lime; font-family: \"Courier New\", monospace; font-size: 12px; font-style: italic; margin-top: 0;'>Si vis pacem, para bellum.</p>", unsafe_allow_html=True)
 
+# Cache files for tickers
+@st.cache_data
+def load_cached_tickers():
+    cache_file = 'tickers_cache.json'
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r') as f:
+            return json.load(f)
+    return []
+
+def save_tickers(tickers):
+    cache_file = 'tickers_cache.json'
+    with open(cache_file, 'w') as f:
+        json.dump(tickers, f)
+
+# Top right controls
+col_ctrls1, col_ctrls2, col_ctrls3 = st.columns([17, 2, 1])
+with col_ctrls2:
+    minimalist = st.checkbox("Minimalist View", key="minimalist")
+with col_ctrls3:
+    if st.button("⚙️", key="settings_icon", help="Settings"):
+        st.session_state.show_settings = not st.session_state.show_settings
+
 # Initialize session state
 if 'history' not in st.session_state:
     st.session_state.history = []
@@ -237,7 +256,7 @@ if 'selected_ticker_list' not in st.session_state:
 if 'show_settings' not in st.session_state:
     st.session_state.show_settings = False
 if 'default_tickers' not in st.session_state:
-    st.session_state.default_tickers = []
+    st.session_state.default_tickers = load_cached_tickers()
 if 'backtest_results' not in st.session_state:
     st.session_state.backtest_results = None
 if 'bt_start_date' not in st.session_state:
@@ -245,19 +264,10 @@ if 'bt_start_date' not in st.session_state:
 if 'bt_end_date' not in st.session_state:
     st.session_state.bt_end_date = datetime.now().date()
 
-# Cache files for tickers
-@st.cache_data
-def load_cached_tickers():
-    cache_file = 'tickers_cache.json'
-    if os.path.exists(cache_file):
-        with open(cache_file, 'r') as f:
-            return json.load(f)
-    return []
-
-def save_tickers(tickers):
-    cache_file = 'tickers_cache.json'
-    with open(cache_file, 'w') as f:
-        json.dump(tickers, f)
+# Function to save ticker lists
+def save_ticker_lists():
+    with open('ticker_lists.json', 'w') as f:
+        json.dump(st.session_state.ticker_lists, f)
 
 def push_to_github():
     try:
@@ -267,97 +277,6 @@ def push_to_github():
         st.success("Pushed updated tickers_cache to GitHub.")
     except Exception as e:
         st.warning(f"Could not push to GitHub: {e}. Ensure git is configured with credentials.")
-
-def push_to_github_historical():
-    parquet_file = 'historical_ohlcv.parquet'
-    try:
-        # Check if there are changes to commit
-        result = subprocess.run(['git', 'diff', '--quiet', parquet_file], capture_output=True)
-        if result.returncode == 0:
-            st.info("No changes to historical_ohlcv.parquet, skipping push.")
-            return
-        subprocess.run(['git', 'add', parquet_file], check=True)
-        subprocess.run(['git', 'commit', '-m', 'Update historical cache'], check=True)
-        subprocess.run(['git', 'push'], check=True)
-        st.success("Pushed updated historical_ohlcv.parquet to GitHub.")
-    except subprocess.CalledProcessError as e:
-        if e.returncode == 1:
-            st.info("No changes to commit for historical_ohlcv.parquet.")
-        else:
-            st.warning(f"Could not push historical to GitHub: {e}. Ensure git is configured with credentials.")
-    except Exception as e:
-        st.warning(f"Could not push historical to GitHub: {e}. Ensure git is configured with credentials.")
-
-def save_ticker_lists():
-    with open('ticker_lists.json', 'w') as f:
-        json.dump(st.session_state.ticker_lists, f)
-
-# Added function to ensure parquet is downloaded from GitHub
-def ensure_parquet_from_github():
-    local_file = 'historical_ohlcv.parquet'
-    if os.path.exists(local_file):
-        return  # Already local
-    # Replace with your GitHub raw URL
-    github_url = "https://raw.githubusercontent.com/yourusername/yourrepo/main/historical_ohlcv.parquet"  # Update this URL
-    try:
-        r = requests.get(github_url)
-        r.raise_for_status()
-        with open(local_file, 'wb') as f:
-            f.write(r.content)
-        st.success("Downloaded historical_ohlcv.parquet from GitHub.")
-    except Exception as e:
-        st.warning(f"Could not download historical_ohlcv.parquet from GitHub: {e}. Proceeding with local file if available or full yfinance download.")
-
-def safe_float(val):
-    if isinstance(val, pd.Series):
-        val = val.iloc[0] if not val.empty else np.nan
-    if pd.isna(val):
-        return float('nan')
-    return float(val)
-
-def safe_int(val):
-    if isinstance(val, pd.Series):
-        val = val.iloc[0] if not val.empty else 0
-    if pd.isna(val):
-        return 0
-    return int(val)
-
-def flatten_new_data(new_data):
-    if not new_data:
-        return pd.DataFrame()
-    rows = []
-    for ticker, date_dict in new_data.items():
-        for date_str, vals in date_dict.items():
-            dt = pd.to_datetime(date_str)
-            if dt.date() < datetime.now().date():
-                rows.append({
-                    'ticker': ticker,
-                    'date': dt,
-                    'open': vals['O'],
-                    'high': vals['H'],
-                    'low': vals['L'],
-                    'close': vals['C'],
-                    'volume': vals['V']
-                })
-    return pd.DataFrame(rows)
-
-def update_parquet(df):
-    if df.empty:
-        return
-    df = df[['ticker', 'date', 'open', 'high', 'low', 'close', 'volume']]
-    parquet_file = 'historical_ohlcv.parquet'
-    if os.path.exists(parquet_file):
-        existing = pd.read_parquet(parquet_file)
-        combined = pd.concat([existing, df], ignore_index=True)
-        combined = combined.drop_duplicates(subset=['ticker', 'date'])
-        combined = combined.sort_values(['ticker', 'date']).reset_index(drop=True)
-        if len(combined) == len(existing):
-            st.info("No new data added to historical_ohlcv.parquet.")
-            return
-    else:
-        combined = df.sort_values(['ticker', 'date']).reset_index(drop=True)
-    combined.to_parquet(parquet_file, index=False, engine='pyarrow')
-    push_to_github_historical()
 
 def get_tickers():
     all_tickers = []
@@ -462,11 +381,10 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
         for ticker in tickers:
             if ticker in full_data.columns.get_level_values(0):
                 ticker_data = full_data[ticker]
-                # Ensure exact date match, normalize to date
-                mask = (ticker_data.index.date == current_date.date())
+                mask = ticker_data.index == current_date
                 single_data = ticker_data[mask]
                 if not single_data.empty:
-                    all_hist_single[ticker] = single_data.iloc[0:1]  # Take first if multiple, but should be one
+                    all_hist_single[ticker] = single_data
         total = len([t for t in tickers if t in all_hist_single])
     else:
         # Original single-day logic
@@ -479,7 +397,7 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
         batch_num = 0
         for chunk in batches:
             batch_num += 1
-            hist_chunk = yf.download(chunk, start=date_str, end=end_date, group_by='ticker', threads=False, progress=False, auto_adjust=False)
+            hist_chunk = yf.download(chunk, start=date_str, end=end_date, group_by='ticker', threads=False, progress=False)
             for ticker in chunk:
                 if ticker in hist_chunk.columns.get_level_values(0) and not hist_chunk[ticker].empty:
                     all_hist_single[ticker] = hist_chunk[ticker]
@@ -492,34 +410,42 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
             if ticker in all_hist_single:
                 single_data = all_hist_single[ticker]
                 if not single_data.empty:
-                    o = safe_float(single_data['Open'])
-                    h = safe_float(single_data['High'])
-                    l = safe_float(single_data['Low'])
-                    c = safe_float(single_data['Close'])
-                    v = safe_int(single_data['Volume'])
+                    o = single_data['Open'].iloc[0]
+                    h = single_data['High'].iloc[0]
+                    l = single_data['Low'].iloc[0]
+                    c = single_data['Close'].iloc[0]
+                    v = single_data['Volume'].iloc[0]
                     
                     range_pct = ((h - l) / c * 100) if c != 0 else 0
                     
                     range_val = (h - l)
-                    signal = 'No'
-                    jw_pct_for_table = 0
                     if range_val == 0:
-                        close_pct_raw = 0
-                        open_pct_raw = 0
+                        close_pct = 0
+                        open_pct = 0
+                        signal = 'No'
                     else:
-                        close_pct_raw = ((h - c) / range_val * 100)
-                        open_pct_raw = ((h - o) / range_val * 100)
+                        close_pct = ((h - c) / range_val * 100)
+                        open_pct = ((h - o) / range_val * 100)
+                        
+                        if mode == 'Bullish':
+                            if open_pct < 33 and close_pct < percentage:
+                                signal = 'Yes'
+                            else:
+                                signal = 'No'
+                        else:  # Bearish
+                            bear_threshold = 100 - percentage
+                            if open_pct > 66 and close_pct > bear_threshold:
+                                signal = 'Yes'
+                            else:
+                                signal = 'No'
                     
-                    bear_threshold = 100 - percentage
+                    # Adjust JW % for Bearish
+                    if mode == 'Bearish':
+                        close_pct = 100 - close_pct
                     
-                    if mode == 'Bullish':
-                        if open_pct_raw < percentage and close_pct_raw < percentage:
-                            signal = 'Yes'
-                            jw_pct_for_table = close_pct_raw
-                    else:  # Bearish
-                        if open_pct_raw > bear_threshold and close_pct_raw > bear_threshold:
-                            signal = 'Yes'
-                            jw_pct_for_table = 100 - close_pct_raw
+                    # Print for backtest
+                    if full_data is not None and current_date is not None:
+                        print(f"{ticker}, {current_date.strftime('%Y-%m-%d')}, {close_pct:.2f}, {open_pct:.2f}")
                     
                     all_data.append({
                         'Ticker': ticker,
@@ -529,14 +455,10 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
                         'Close': round(c, 2),
                         'Volume': int(v),
                         'Range %': round(range_pct, 2),
-                        'JW %': round(jw_pct_for_table, 2),
+                        'JW %': round(close_pct, 2),
                         'Signal': signal,
                         'JW Mode': mode
                     })
-                    
-                    # Print for backtest only if signal Yes - print raw values
-                    if signal == 'Yes' and full_data is not None and current_date is not None:
-                        print(f"{ticker}, {current_date.strftime('%Y-%m-%d')}, {close_pct_raw:.2f}, {open_pct_raw:.2f}")
         except Exception as e:
             print(f"Error for {ticker}: {e}")
             continue
@@ -559,9 +481,8 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
         for ticker in yes_tickers_mode:
             if ticker in full_data.columns.get_level_values(0):
                 ticker_data = full_data[ticker]
-                start_mask = (ticker_data.index.date >= pd.to_datetime(start_30d).date())
-                hist_30d_mask = start_mask & (ticker_data.index.date < current_date.date())
-                hist_30d = ticker_data[hist_30d_mask]
+                start_mask = ticker_data.index >= pd.to_datetime(start_30d)
+                hist_30d = ticker_data[start_mask & (ticker_data.index < current_date)]
                 if not hist_30d.empty:
                     all_hist_30d[ticker] = hist_30d
     else:
@@ -574,7 +495,7 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
         yes_batch_num = 0
         for yes_chunk in yes_batches:
             yes_batch_num += 1
-            hist_30d_chunk = yf.download(yes_chunk, start=start_30d, end=end_date, group_by='ticker', threads=False, progress=False, auto_adjust=False)
+            hist_30d_chunk = yf.download(yes_chunk, start=start_30d, end=end_date, group_by='ticker', threads=False, progress=False)
             for ticker in yes_chunk:
                 if ticker in hist_30d_chunk.columns.get_level_values(0) and not hist_30d_chunk[ticker].empty:
                     all_hist_30d[ticker] = hist_30d_chunk[ticker]
@@ -587,7 +508,7 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
 
     comp_total = len(df_mode)
     comp_processed = 0
-    single_idx = current_date if current_date is not None else pd.to_datetime(date_str)
+    single_idx = current_date if current_date else pd.to_datetime(date_str)
     for idx, row in df_mode.iterrows():
         ticker = row['Ticker']
         try:
@@ -597,13 +518,11 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
                     v = row['Volume']
                     
                     volumes = full_data_t['Volume'].dropna()
-                    volumes_before = volumes[volumes.index.date < single_idx.date()]
-                    volumes_for_avg = volumes_before.tail(30) if len(volumes_before) >= 30 else volumes_before
-                    if not volumes_for_avg.empty:
-                        if len(volumes_for_avg) == 1:
-                            avg_vol = float(volumes_for_avg.iloc[0])
-                        else:
-                            avg_vol = volumes_for_avg.mean()
+                    volumes_before = volumes[volumes.index < single_idx]
+                    if len(volumes_before) >= 30:
+                        avg_vol = volumes_before.tail(30).mean()
+                    elif len(volumes_before) > 0:
+                        avg_vol = volumes_before.mean()
                     else:
                         avg_vol = 0
                     
@@ -613,7 +532,7 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
                     df_mode.at[idx, 'rVolume'] = round(rel_vol, 2)
 
                     # Compute rVolatility
-                    before_data = full_data_t[full_data_t.index.date < single_idx.date()]
+                    before_data = full_data_t[full_data_t.index < single_idx]
                     if len(before_data) >= 30:
                         recent_data = before_data.tail(30)
                     elif len(before_data) > 0:
@@ -626,10 +545,7 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
                         lows_recent = recent_data['Low']
                         closes_recent = recent_data['Close']
                         daily_range_pct = ((highs_recent - lows_recent) / closes_recent) * 100
-                        if len(daily_range_pct) == 1:
-                            avg_range_pct = float(daily_range_pct.iloc[0])
-                        else:
-                            avg_range_pct = daily_range_pct.mean()
+                        avg_range_pct = daily_range_pct.mean()
                     else:
                         avg_range_pct = 0
 
@@ -670,18 +586,16 @@ def process_mode(mode, mode_progress_start, mode_progress_end, progress_containe
 
 def process_data(date_str, percentage, filter_mode, min_avg_vol, min_rel_vol, min_rvolat, tickers=None, progress_container=None, full_data=None, current_date=None):
     if tickers is None or len(tickers) == 0:
-        if progress_container is not None:
+        if progress_container:
             custom_progress(progress_container, 1.0, "100%")
         return pd.DataFrame()
     
-    if progress_container is None and full_data is None:
+    if progress_container is None:
         progress_container = st.empty()
-        custom_progress(progress_container, 0, "0%")
-    elif progress_container is None:
-        # backtest, no progress
-        pass
     
-    date = datetime.strptime(date_str, '%Y-%m-%d').date() if current_date is None else pd.to_datetime(current_date).date()
+    custom_progress(progress_container, 0, "0%")
+    
+    date = datetime.strptime(date_str, '%Y-%m-%d').date() if not current_date else pd.to_datetime(current_date).date()
     end_date = (date + timedelta(days=1)).strftime('%Y-%m-%d')
     start_30d = (date - timedelta(days=45)).strftime('%Y-%m-%d')
 
@@ -693,12 +607,10 @@ def process_data(date_str, percentage, filter_mode, min_avg_vol, min_rel_vol, mi
         df = process_mode(filter_mode, 0.0, 1.0, progress_container, tickers, date_str, percentage, start_30d, end_date, min_avg_vol, min_rel_vol, min_rvolat, full_data, current_date)
 
     if df.empty:
-        if progress_container is not None:
-            custom_progress(progress_container, 1.0, "100%")
+        custom_progress(progress_container, 1.0, "100%")
         return pd.DataFrame()
 
-    if progress_container is not None:
-        custom_progress(progress_container, 1.0, "100%")
+    custom_progress(progress_container, 1.0, "100%")
 
     def rel_vol_score(x):
         if x <= 0.5:
@@ -796,12 +708,6 @@ def style_df(df, minimalist):
     if 'Date' in df.columns:  # backtest mode
         display_columns = ['Date', 'Ticker', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'JW Signal', 'Strength', 'Days Held', 'Win/Loss', 'PnL $', 'PnL %', 'Take Profit Target Price', 'Stop Loss Price']
         subset = subset[display_columns]
-        # Handle TP and SL columns for display
-        if 'Take Profit Target Price' in subset.columns:
-            subset['Take Profit Target Price'] = subset['Take Profit Target Price'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else 'N/A')
-        if 'Stop Loss Price' in subset.columns:
-            subset['Stop Loss Price'] = subset['Stop Loss Price'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else 'N/A')
-        float_cols = ['Open', 'High', 'Low', 'Close', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'Strength', 'PnL $']
     else:  # live scan
         if minimalist:
             jw_col = 'JW Mode'
@@ -813,8 +719,8 @@ def style_df(df, minimalist):
             close_col = 'Close'
             display_columns = ['Ticker', 'Open', 'High', 'Low', close_col, 'Volume', '30D Avg Vol', 'rVolume', 'rVolatility', 'JW %', jw_col, 'Strength']
             subset = subset.reindex(columns=[c for c in display_columns if c in subset.columns])
-        float_cols = ['Open', 'High', 'Low', 'Close', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'Strength', 'PnL $']
 
+    float_cols = ['Open', 'High', 'Low', 'Close', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'Strength', 'PnL $', 'Take Profit Target Price', 'Stop Loss Price']
     format_dict = {col: '{:.2f}' for col in float_cols if col in subset.columns}
 
     # Format PnL columns
@@ -826,250 +732,48 @@ def style_df(df, minimalist):
     subset = subset.style.format(format_dict)
 
     # Apply styling to Strength column
-    subset = subset.map(highlight_strength, subset=pd.IndexSlice[:, ['Strength']])
+    subset = subset.applymap(highlight_strength, subset=pd.IndexSlice[:, ['Strength']])
     # For backtest, highlight PnL if present
     pnl_cols = ['PnL $', 'PnL %']
     for col in pnl_cols:
         if col in df.columns:
-            subset = subset.map(highlight_pnl, subset=pd.IndexSlice[:, [col]])
+            subset = subset.applymap(highlight_pnl, subset=pd.IndexSlice[:, [col]])
     
     # Highlight JW Signal
     if 'JW Signal' in subset.columns:
-        subset = subset.map(highlight_jw_signal, subset=pd.IndexSlice[:, ['JW Signal']])
+        subset = subset.applymap(highlight_jw_signal, subset=pd.IndexSlice[:, ['JW Signal']])
     
     # Highlight Outcome
     if 'Win/Loss' in subset.columns:
-        subset = subset.map(highlight_outcome, subset=pd.IndexSlice[:, ['Win/Loss']])
+        subset = subset.applymap(highlight_outcome, subset=pd.IndexSlice[:, ['Win/Loss']])
 
     return subset
 
-# Improved backtest helpers with progress and console logs
-def fetch_backtest_data(start_date, end_date, tickers_list, progress_container=None):
-    ensure_parquet_from_github()  # Ensure parquet is available from GitHub
-    
+# Backtest helpers
+def fetch_backtest_data(start_date, end_date, tickers_list):
     if isinstance(tickers_list, str) and tickers_list == 'Full Cache':
         tickers = st.session_state.default_tickers
     else:
         tickers = [tickers_list.upper()] if isinstance(tickers_list, str) else tickers_list
-    
-    data_dict = {}
-    new_data = {}
-    current_date = datetime.now().date()
-    parquet_file = 'historical_ohlcv.parquet'
-    
-    start_dt = pd.to_datetime(start_date)
-    end_dt = pd.to_datetime(end_date)
-    
-    if progress_container:
-        custom_progress(progress_container, 0.0, "Initializing data fetch...")
-    
-    print(f"Fetching backtest data from {start_date} to {end_date} for {len(tickers)} tickers.")
-    
-    parquet_existed = os.path.exists(parquet_file)
-    grouped = {}
-    if parquet_existed:
-        print(f"Loading historical_ohlcv.parquet from local/GitHub...")
-        if progress_container:
-            custom_progress(progress_container, 0.05, "Loading parquet file...")
-        # Load entire parquet once for efficiency
-        df_all = pd.read_parquet(parquet_file)
-        df_all['date'] = pd.to_datetime(df_all['date'])
-        df_range = df_all[(df_all['date'] >= start_dt) & (df_all['date'] <= end_dt)]
-        print(f"Loaded {len(df_range)} total rows from parquet for the date range.")
-        
-        # Group by ticker
-        grouped = df_range.groupby('ticker')
-        print(f"Found data in parquet for {len(grouped)} unique tickers.")
-        # Convert GroupBy to dict for consistent access
-        grouped = {name: group for name, group in grouped}
-        
-        if progress_container:
-            custom_progress(progress_container, 0.1, f"Processing {len(tickers)} tickers from parquet...")
-    else:
-        # Fallback: download all data from yfinance if no parquet
-        print("No historical_ohlcv.parquet found. Downloading full data from yfinance (this may take time).")
-        grouped = {}
-        df_range = pd.DataFrame()
-        if progress_container:
-            custom_progress(progress_container, 0.0, "Downloading full data from yfinance...")
-        batch_size = 50  # Smaller batches for full download
-        batches = [tickers[i:i+batch_size] for i in range(0, len(tickers), batch_size)]
-        full_hist = pd.DataFrame()
-        batch_idx = 0
-        for batch in batches:
-            batch_idx += 1
-            print(f"Downloading batch {batch_idx}/{len(batches)}: {batch[:3]}...")
-            if progress_container:
-                custom_progress(progress_container, (batch_idx / len(batches)) * 0.4, f"Downloading batch {batch_idx}/{len(batches)}...")
-            batch_data = yf.download(batch, start=start_date, end=(pd.to_datetime(end_date) + timedelta(days=1)).strftime('%Y-%m-%d'), group_by='ticker', progress=False, auto_adjust=False)
-            full_hist = pd.concat([full_hist, batch_data], axis=1)
-        
-        # Build grouped from full_hist for consistency
-        for ticker in tickers:
-            if ticker in full_hist.columns.get_level_values(0):
-                ticker_df = full_hist[ticker].sort_index()
-                if not ticker_df.empty:
-                    # Convert to long format for grouped simulation
-                    long_df = ticker_df.reset_index().rename(columns={'Date': 'date'})
-                    long_df['ticker'] = ticker
-                    long_df['open'] = long_df['Open']
-                    long_df['high'] = long_df['High']
-                    long_df['low'] = long_df['Low']
-                    long_df['close'] = long_df['Close']
-                    long_df['volume'] = long_df['Volume']
-                    long_df = long_df[['ticker', 'date', 'open', 'high', 'low', 'close', 'volume']]
-                    long_df['date'] = pd.to_datetime(long_df['date'])
-                    grouped[ticker] = long_df
-                    print(f"Downloaded {len(long_df)} days for {ticker} from yfinance.")
-        
-        print("Full download complete.")
-        if progress_container:
-            custom_progress(progress_container, 0.5, "Full yfinance download complete.")
-        
-        # Save the full download to parquet since no existing file
-        all_long_dfs = [grouped[ticker] for ticker in tickers if ticker in grouped]
-        if all_long_dfs:
-            full_new_df = pd.concat(all_long_dfs, ignore_index=True)
-            update_parquet(full_new_df)
-            print("Full download saved to parquet.")
-    
-    # Compute union of actual trading dates across all loaded tickers
-    union_dates = set()
-    for t, g in grouped.items():
-        if not g.empty and 'date' in g.columns:
-            union_dates.update(g['date'].dt.date)
-    print(f"Union of {len(union_dates)} actual trading dates across tickers.")
-    
-    # Process tickers
-    tickers_set = set(tickers)
-    processed_tickers = 0
-    for ticker in tickers:
-        processed_tickers += 1
-        print(f"Processing {ticker} ({processed_tickers}/{len(tickers)})...")
-        
-        # Update progress less frequently to avoid multiple bars
-        if progress_container and processed_tickers % 10 == 0:
-            prog = 0.1 + (processed_tickers / len(tickers)) * 0.3
-            custom_progress(progress_container, prog, f"Processing ticker {processed_tickers}/{len(tickers)}: {ticker}")
-        
-        group_long = grouped.get(ticker, pd.DataFrame())
-        existing_dates = set(group_long['date'].dt.date) if not group_long.empty else set()
-        
-        missing_dates_set = union_dates - existing_dates
-        if missing_dates_set:
-            print(f"Found {len(missing_dates_set)} missing dates for {ticker}, downloading...")
-            missing_dates = sorted([pd.Timestamp(d) for d in missing_dates_set])
-            miss_start = missing_dates[0].strftime('%Y-%m-%d')
-            miss_end = (missing_dates[-1] + timedelta(days=1)).strftime('%Y-%m-%d')
-            print(f"Downloading missing data for {ticker} from {miss_start} to {miss_end} via yfinance...")
-            # Removed progress update for missing downloads to avoid frequent updates
-            miss_data = yf.download(ticker, start=miss_start, end=miss_end, progress=False, auto_adjust=False)
-            
-            if not miss_data.empty:
-                downloaded_count = 0
-                for date_idx, row in miss_data.iterrows():
-                    date_d = date_idx.date()
-                    if date_d not in missing_dates_set:
-                        continue
-                    # Skip if NaN
-                    if pd.isna(row[['Open', 'High', 'Low', 'Close', 'Volume']]).any():
-                        continue
-                    
-                    # Collect for new_data update
-                    date_str = date_idx.strftime('%Y-%m-%d')
-                    if ticker not in new_data:
-                        new_data[ticker] = {}
-                    new_data[ticker][date_str] = {
-                        'O': safe_float(row['Open']),
-                        'H': safe_float(row['High']),
-                        'L': safe_float(row['Low']),
-                        'C': safe_float(row['Close']),
-                        'V': safe_int(row['Volume'])
-                    }
-                    
-                    # Add to group_long
-                    added_row = pd.Series({
-                        'ticker': ticker,
-                        'date': date_idx,
-                        'open': row['Open'],
-                        'high': row['High'],
-                        'low': row['Low'],
-                        'close': row['Close'],
-                        'volume': row['Volume']
-                    })
-                    group_long = pd.concat([group_long, added_row.to_frame().T], ignore_index=True)
-                    
-                    downloaded_count += 1
-                print(f"Downloaded and added {downloaded_count} missing days for {ticker} from yfinance.")
-            else:
-                print(f"No data downloaded for missing dates of {ticker}.")
-        
-        # Now set index and rename for the updated group
-        group = group_long
-        if not group.empty:
-            group = group.set_index('date')
-            group.index = pd.to_datetime(group.index)
-            # Rename columns to match yfinance
-            group = group[['open', 'high', 'low', 'close', 'volume']].rename(columns={
-                'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
-            })
-            print(f"Loaded {len(group)} days from parquet for {ticker}.")
-        else:
-            group = pd.DataFrame()
-            print(f"No data available for {ticker} after download.")
-        
-        if not group.empty:
-            group = group.sort_index()
-            data_dict[ticker] = group
-    
-    print("All tickers processed. Building full dataset...")
-    if progress_container:
-        custom_progress(progress_container, 0.5, "Building full dataset...")
-    
-    # Build full_data as MultiIndex
-    if data_dict:
-        full_data_list = []
-        for ticker, tdf in data_dict.items():
-            tdf_copy = tdf.copy()
-            tdf_copy.columns = pd.MultiIndex.from_product([[ticker], tdf.columns])
-            full_data_list.append(tdf_copy)
-        full_data = pd.concat(full_data_list, axis=1)
-        print(f"Built full_data with {len(full_data)} rows across {len(data_dict)} tickers.")
-    else:
-        full_data = pd.DataFrame()
-        print("No data built.")
-    
-    # Update Parquet at the end with new data
-    if new_data:
-        print("Updating parquet with new data...")
-        new_df = flatten_new_data(new_data)
-        update_parquet(new_df)
-        print("Parquet updated.")
-    
-    if progress_container:
-        custom_progress(progress_container, 0.5, "Historical data fetch complete.")
-    
+    full_data = yf.download(tickers, start=start_date, end=end_date, interval='1d', group_by='ticker', threads=False, progress=False)
     return full_data
 
 def get_forward_data(full_data, ticker, current_date):
     if ticker not in full_data.columns.get_level_values(0):
         return pd.DataFrame()
     ticker_data = full_data[ticker]
-    mask = ticker_data.index.date > current_date.date()
+    mask = ticker_data.index > current_date
     after = ticker_data[mask]
     return after
 
-def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl_percent=0.0, jw_percent=20.0, min_avg_vol=0.1, min_rel_vol=0.9, min_rvolat=1.0, rr=1.5, progress_container=None):
+def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw_percent=20.0, min_avg_vol=5.0, min_rel_vol=0.9, min_rvolat=1.0, rr=1.5):
     # Handle tickers: full list or single
     if isinstance(tickers_list, str) and tickers_list == 'Full Cache':
         tickers = st.session_state.default_tickers
     else:
         tickers = [tickers_list.upper()] if isinstance(tickers_list, str) else tickers_list
 
-    if progress_container:
-        custom_progress(progress_container, 0.0, "Fetching historical data...")
-    
-    full_data = fetch_backtest_data(start_date, end_date, tickers_list, progress_container)
+    full_data = fetch_backtest_data(start_date, end_date, tickers_list)
     
     if full_data.empty:
         default_summary = {
@@ -1077,30 +781,22 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
             'Win_Rate': 0.0,
             'Avg_PnL': 0.0,
             'Max_Drawdown': 0.0,
-            'Sharpe': 0.0,
-            'Avg_Days_Held': 0.0
+            'Sharpe': 0.0
         }
-        if progress_container:
-            custom_progress(progress_container, 1.0, "100% - No data available")
         return pd.DataFrame(), default_summary
     
     # Use actual data dates/bars only - key fix for no results
     dates = sorted(full_data.index.unique())
     
     total_dates = len(dates)
-    print(f"Starting backtest on {total_dates} dates from {dates[0].strftime('%Y-%m-%d')} to {dates[-1].strftime('%Y-%m-%d')}.")
 
     all_signals = []
     processed_dates = 0
-    if progress_container:
-        custom_progress(progress_container, 0.5, "Initializing backtest...")
     for date in dates:
         try:
-            print(f"Processing date: {date.strftime('%Y-%m-%d')} ({processed_dates + 1}/{total_dates})")
             # Use date as current_date for slicing
             df_day = process_data(date.strftime('%Y-%m-%d'), jw_percent, jw_mode, min_avg_vol, min_rel_vol, min_rvolat, tickers, None, full_data, date)
             if not df_day.empty:
-                print(f"Found {len(df_day)} signals on {date.strftime('%Y-%m-%d')}.")
                 for _, signal in df_day.iterrows():
                     ticker = signal['Ticker']
                     mode = signal['JW Mode']
@@ -1123,13 +819,6 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
                             else:
                                 wick_size = (entry_h - higher_oc) / 2
                                 sl_price = higher_oc + wick_size
-                        elif sl_strategy == 'Custom':
-                            if sl_percent > 0:
-                                sl_pct = sl_percent / 100
-                                if mode == 'Bullish':
-                                    sl_price = entry_c * (1 - sl_pct)
-                                else:
-                                    sl_price = entry_c * (1 + sl_pct)
                     
                     # Compute TP price
                     tp_price = None
@@ -1153,8 +842,8 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
                     hit = False
                     dir = 1 if mode == 'Bullish' else -1
                     for i, bar in enumerate(forward_bars.itertuples(index=False)):
-                        hit_tp = (tp_price is not None) and ((mode == 'Bullish' and bar.High >= tp_price) or (mode == 'Bearish' and bar.Low <= tp_price))
-                        hit_sl = (sl_price is not None) and ((mode == 'Bullish' and bar.Low <= sl_price) or (mode == 'Bearish' and bar.High >= sl_price))
+                        hit_tp = tp_price is not None and ((mode == 'Bullish' and bar.High >= tp_price) or (mode == 'Bearish' and bar.Low <= tp_price))
+                        hit_sl = sl_price is not None and ((mode == 'Bullish' and bar.Low <= sl_price) or (mode == 'Bearish' and bar.High >= sl_price))
                         if hit_tp:
                             hit_day = i + 1
                             exit_price = tp_price
@@ -1188,23 +877,17 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
                         'PnL_%': pnl_percent,
                         'Days_Held': hit_day,
                         'Outcome': outcome,
-                        'TP_Price': tp_price if tp_price is not None else np.nan,
-                        'SL_Price': sl_price if sl_price is not None else np.nan,
+                        'TP_Price': tp_price,
+                        'SL_Price': sl_price,
                         'rVolume': signal['rVolume'],
                         'Strength': signal['Strength'],
                         'JW_Percent': signal['JW %'],
                         'rVolatility': signal['rVolatility']
                     })
-            else:
-                print(f"No signals found on {date.strftime('%Y-%m-%d')}.")
         except Exception as e:
             print(f"Error processing {date}: {e}")
         
         processed_dates += 1
-        # Update progress less frequently to avoid multiple bars
-        if progress_container and processed_dates % 5 == 0:
-            progress_val = 0.5 + (processed_dates / total_dates) * 0.5
-            custom_progress(progress_container, progress_val, f"Processing date {processed_dates}/{total_dates}: {date.strftime('%Y-%m-%d')}")
     
     # Always return full summary
     default_summary = {
@@ -1212,13 +895,10 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
         'Win_Rate': 0.0,
         'Avg_PnL': 0.0,
         'Max_Drawdown': 0.0,
-        'Sharpe': 0.0,
-        'Avg_Days_Held': 0.0
+        'Sharpe': 0.0
     }
     
     if not all_signals:
-        if progress_container:
-            custom_progress(progress_container, 1.0, "100% - No signals found")
         return pd.DataFrame(), default_summary
     
     df_bt = pd.DataFrame(all_signals)
@@ -1229,7 +909,6 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
         avg_pnl = 0.0
         sharpe = 0.0
         max_dd = 0.0
-        avg_days_held = 0.0
     else:
         win_rate = (df_bt['Outcome'] == 'Win').mean() * 100
         pnls = df_bt['PnL_%']
@@ -1237,34 +916,20 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
         sharpe = avg_pnl / (pnls.std() + 1e-8)
         cum_returns = np.cumsum(pnls - avg_pnl)
         max_dd = np.min(cum_returns) if len(cum_returns) > 0 else 0.0
-        avg_days_held = df_bt['Days_Held'].mean()
     
     summary = {
         'Total_Signals': len(df_bt),
         'Win_Rate': round(win_rate, 1),
         'Avg_PnL': round(avg_pnl, 2),
         'Max_Drawdown': round(max_dd, 2),
-        'Sharpe': round(sharpe, 2),
-        'Avg_Days_Held': round(avg_days_held, 1)
+        'Sharpe': round(sharpe, 2)
     }
-    
-    print(f"Backtest complete: {len(df_bt)} signals found.")
-    if progress_container:
-        custom_progress(progress_container, 1.0, f"100% - Backtest complete: {len(df_bt)} signals found")
     
     return df_bt, summary
 
 # Template CSV for tickers
 template_df = pd.DataFrame({'Ticker': ['AAPL', 'GOOGL']})
 template_csv = template_df.to_csv(index=False).encode('utf-8')
-
-# Top right controls
-col_ctrls1, col_ctrls2, col_ctrls3 = st.columns([17, 2, 1])
-with col_ctrls2:
-    minimalist = st.checkbox("Minimalist View", key="minimalist")
-with col_ctrls3:
-    if st.button("⚙️", key="settings_icon", help="Settings"):
-        st.session_state.show_settings = not st.session_state.show_settings
 
 # Settings popup
 if st.session_state.show_settings:
@@ -1290,62 +955,6 @@ if st.session_state.show_settings:
     with col_fetch2:
         st.info(f"Current cached tickers: {len(st.session_state.default_tickers)}")
     
-    st.subheader("Historical Data Cache")
-    now = datetime.now()
-    last_day = monthrange(now.year, now.month)[1]
-    max_hist_end = date(now.year, now.month, last_day)
-    col_hist1, col_hist2 = st.columns(2)
-    with col_hist1:
-        hist_start = st.date_input("Start Date for Fetch", value=datetime(2020, 1, 1).date(), key="hist_start")
-    with col_hist2:
-        hist_end = st.date_input("End Date for Fetch", value=now.date(), max_value=max_hist_end, key="hist_end")
-    
-    progress_hist = st.empty()
-    
-    if st.button("Fetch Data"):
-        with st.spinner("Fetching historical data..."):
-            custom_progress(progress_hist, 0.0, "Initializing...")
-            tickers = st.session_state.default_tickers
-            if not tickers:
-                st.warning("No tickers available. Fetch default tickers first.")
-                custom_progress(progress_hist, 1.0, "100% - No tickers")
-            else:
-                batch_size = 50
-                batches = [tickers[i:i+batch_size] for i in range(0, len(tickers), batch_size)]
-                all_hist = pd.DataFrame()
-                for batch_idx, batch in enumerate(batches):
-                    custom_progress(progress_hist, (batch_idx / len(batches)) * 0.8, f"Downloading batch {batch_idx+1}/{len(batches)}")
-                    batch_data = yf.download(batch, start=hist_start, end=(hist_end + timedelta(days=1)).strftime('%Y-%m-%d'), group_by='ticker', progress=False, auto_adjust=False)
-                    all_hist = pd.concat([all_hist, batch_data], axis=1)
-                
-                custom_progress(progress_hist, 0.8, "Processing data...")
-                all_data = []
-                processed = 0
-                total_tickers = len(tickers)
-                for ticker in tickers:
-                    processed += 1
-                    if processed % 10 == 0 or processed == total_tickers:
-                        custom_progress(progress_hist, 0.8 + (processed / total_tickers) * 0.2, f"Processing {processed}/{total_tickers} tickers")
-                    if ticker in all_hist.columns.get_level_values(0):
-                        ticker_df = all_hist[ticker].reset_index()
-                        ticker_df['ticker'] = ticker
-                        renamed_df = ticker_df[['ticker', 'Date', 'Open', 'High', 'Low', 'Close', 'Volume']].rename(columns={
-                            'Date': 'date',
-                            'Open': 'open',
-                            'High': 'high',
-                            'Low': 'low',
-                            'Close': 'close',
-                            'Volume': 'volume'
-                        })
-                        all_data.append(renamed_df)
-                if all_data:
-                    full_df = pd.concat(all_data, ignore_index=True)
-                    full_df['date'] = pd.to_datetime(full_df['date'])
-                    update_parquet(full_df)
-                    custom_progress(progress_hist, 1.0, "100% - Historical data cached!")
-                else:
-                    custom_progress(progress_hist, 1.0, "100% - No data to cache")
-    
     st.subheader("Create New List")
     st.download_button("Download Template", template_csv, "ticker_template.csv", "text/csv")
     with st.form("new_list_form"):
@@ -1367,143 +976,10 @@ if st.session_state.show_settings:
         st.session_state.show_settings = False
         st.rerun()
 
-# Tab structure - Backtest Engine as default primary tab on left
-tab1, tab2 = st.tabs(["Backtest Engine", "Live Scan"])
+# Tab structure
+tab1, tab2 = st.tabs(["Live Scan", "Backtest Engine"])
 
 with tab1:
-    # Backtest inputs
-    resolution = '1d'  # Fixed to daily
-    col_bt1, col_bt2, col_bt3 = st.columns(3)
-    with col_bt1:
-        start_date = st.date_input("Start Date", value=st.session_state.bt_start_date, min_value=datetime(2010, 1, 1).date(), max_value=datetime.now().date(), key="bt_start")
-        st.session_state.bt_start_date = start_date
-        end_date = st.date_input("End Date", value=st.session_state.bt_end_date, min_value=start_date, max_value=datetime.now().date(), key="bt_end")
-        st.session_state.bt_end_date = end_date
-        ticker_choice = st.selectbox("Tickers", ['Full Cache', 'Manual'], index=0, key="bt_tickers_choice")
-        if ticker_choice == 'Manual':
-            manual_ticker = st.text_input("Enter Ticker", value="AAPL", key="bt_manual")
-            bt_tickers = manual_ticker
-        else:
-            bt_tickers = 'Full Cache'
-    with col_bt2:
-        bt_jw_mode = st.selectbox("JW Mode", ['All', 'Bullish', 'Bearish'], index=0, key="bt_jw_mode")
-        bt_rr = st.number_input("R/R", value=1.5, min_value=0.0, step=0.1, key="bt_rr")
-        sl_strategy = st.selectbox("Stop Loss", ['None', 'Full Wick', 'Half Wick', 'Custom'], index=1, key="bt_sl")
-        bt_sl_percent = 0.0
-        if sl_strategy == 'Custom':
-            bt_sl_percent = st.number_input("Stop Loss %", value=2.0, min_value=0.0, step=0.1, key="bt_sl_percent")
-    with col_bt3:
-        bt_jw_percent = st.number_input("JW %", value=20.0, min_value=0.0, step=1.0, key="bt_jw_percent")
-        bt_min_avg_vol = st.number_input("Min aVolume (M)", value=0.1, min_value=0.0, step=0.1, key="bt_min_avg_vol")
-        bt_min_rel_vol = st.number_input("Min rVolume", value=0.9, min_value=0.0, step=0.1, key="bt_min_rel_vol")
-        bt_min_rvolat = st.number_input("Min rVolatility", value=1.0, min_value=0.0, step=0.1, key="bt_min_rvolat")
-
-    bt_progress = st.empty()
-
-    if st.session_state.backtest_results is None:
-        custom_progress(bt_progress, 0, "0%")
-
-    if st.button("Run Backtest", key="run_bt"):
-        # Removed st.spinner to eliminate the spinning wheel and text
-        df_bt, summary = backtest_engine(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), bt_tickers, bt_jw_mode, sl_strategy, bt_sl_percent, bt_jw_percent, min_avg_vol=bt_min_avg_vol, min_rel_vol=bt_min_rel_vol, min_rvolat=bt_min_rvolat, rr=bt_rr, progress_container=bt_progress)
-        st.session_state.backtest_results = (df_bt, summary)
-        st.rerun()
-
-    if st.session_state.backtest_results is not None:
-        try:
-            df_bt, summary = st.session_state.backtest_results
-        except (ValueError, TypeError):
-            st.error("Invalid backtest results format. Rerun the backtest.")
-            st.session_state.backtest_results = None
-            st.rerun()
-        
-        # Ensure summary has defaults
-        default_keys = {'Total_Signals': 0, 'Win_Rate': 0.0, 'Avg_PnL': 0.0, 'Max_Drawdown': 0.0, 'Sharpe': 0.0, 'Avg_Days_Held': 0.0}
-        for key, val in default_keys.items():
-            if key not in summary:
-                summary[key] = val
-        
-        if summary['Total_Signals'] == 0:
-            st.info("🔍 No John Wicks identified in the backtest period. Try loosening filters (e.g., lower min rVolume) or extending the date range.")
-        else:
-            # Summary metrics
-            col_sum1, col_sum2, col_sum3, col_sum4, col_sum5 = st.columns(5)
-            with col_sum1:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h3>Total Signals</h3>
-                    <p style="color: lime; font-size: 20px; font-weight: bold;">{summary['Total_Signals']}</p>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_sum2:
-                color = 'lime' if summary['Win_Rate'] > 50 else '#FF6B6B'
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h3>Win Rate</h3>
-                    <p style="color: {color}; font-size: 20px; font-weight: bold;">{summary['Win_Rate']}%</p>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_sum3:
-                color = 'lime' if summary['Avg_PnL'] > 0 else '#FF6B6B'
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h3>Avg P&L</h3>
-                    <p style="color: {color}; font-size: 20px; font-weight: bold;">{summary['Avg_PnL']}%</p>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_sum4:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h3>Sharpe Ratio</h3>
-                    <p style="color: lime; font-size: 20px; font-weight: bold;">{summary['Sharpe']}</p>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_sum5:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h3>Avg Days Held</h3>
-                    <p style="color: lime; font-size: 20px; font-weight: bold;">{summary['Avg_Days_Held']}</p>
-                </div>
-                """, unsafe_allow_html=True)
-
-            # Table
-            if not df_bt.empty:
-                # Rename columns
-                df_display = df_bt.rename(columns={'Signal_Date': 'Date', 'JW_Percent': 'JW %', 'Mode': 'JW Signal', 'Entry_Close': 'Close Price', 'Days_Held': 'Days Held', 'Outcome': 'Win/Loss', 'PnL_$': 'PnL $', 'PnL_%': 'PnL %', 'TP_Price': 'Take Profit Target Price', 'SL_Price': 'Stop Loss Price'})
-                df_display = df_display.sort_values('Strength', ascending=False)
-                styled_bt = style_df(df_display, minimalist)
-                st.dataframe(styled_bt, width='stretch', hide_index=True)
-                
-                csv_bt = df_bt.to_csv(index=False).encode('utf-8')
-                st.download_button("EXPORT BACKTEST CSV", csv_bt, "jw_backtest.csv", "text/csv", key="export_bt")
-
-            # Charts if not minimalist and signals exist
-            if not minimalist and summary['Total_Signals'] > 0 and not df_bt.empty:
-                try:
-                    col_chart1, col_chart2 = st.columns(2)
-                    with col_chart1:
-                        # Avg P&L
-                        if 'PnL_%' in df_bt.columns:
-                            avg_pnl = df_bt['PnL_%'].mean()
-                            fig_pnl = px.bar(x=['PnL'], y=[avg_pnl], title="Avg P&L")
-                            fig_pnl.add_hline(y=0, line_dash="dash", line_color="red")
-                            st.plotly_chart(fig_pnl, use_container_width=True)
-                        else:
-                            st.warning("No PnL data for P&L chart.")
-                    
-                    with col_chart2:
-                        # Win rate by mode
-                        if 'Outcome' in df_bt.columns:
-                            win_by_mode = df_bt.groupby('Mode')['Outcome'].apply(lambda x: (x == 'Win').mean() * 100).reset_index()
-                            win_by_mode.columns = ['Mode', 'Win_Rate_%']
-                            fig_win = px.bar(win_by_mode, x='Mode', y='Win_Rate_%', title="Win Rate by Mode")
-                            st.plotly_chart(fig_win, use_container_width=True)
-                        else:
-                            st.warning("No Outcome data for win rate chart.")
-                except Exception as e:
-                    st.warning(f"Error generating charts: {e}")
-
-with tab2:
     # Original inputs
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -1542,12 +1018,130 @@ with tab2:
     if st.session_state.analysis_run:
         if not st.session_state.last_df.empty:
             styled_df = style_df(st.session_state.last_df, minimalist)
-            st.dataframe(styled_df, width='stretch', hide_index=True)
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
             
             # Export
             csv = st.session_state.last_df.to_csv(index=False).encode('utf-8')
             st.download_button("EXPORT CSV", csv, "jw_terminal.csv", "text/csv", key="export")
 
-# Load default tickers if not already loaded
-if not st.session_state.default_tickers:
-    st.session_state.default_tickers = load_cached_tickers()
+with tab2:
+    # Backtest inputs
+    resolution = '1d'  # Fixed to daily
+    col_bt1, col_bt2, col_bt3 = st.columns(3)
+    with col_bt1:
+        start_date = st.date_input("Start Date", value=st.session_state.bt_start_date, min_value=datetime(2010, 1, 1).date(), max_value=datetime.now().date(), key="bt_start")
+        st.session_state.bt_start_date = start_date
+        end_date = st.date_input("End Date", value=st.session_state.bt_end_date, min_value=start_date, max_value=datetime.now().date(), key="bt_end")
+        st.session_state.bt_end_date = end_date
+        ticker_choice = st.selectbox("Tickers", ['Full Cache', 'Manual'], index=0, key="bt_tickers_choice")
+        if ticker_choice == 'Manual':
+            manual_ticker = st.text_input("Enter Ticker", value="AAPL", key="bt_manual")
+            bt_tickers = manual_ticker
+        else:
+            bt_tickers = 'Full Cache'
+    with col_bt2:
+        bt_jw_mode = st.selectbox("JW Mode", ['All', 'Bullish', 'Bearish'], index=0, key="bt_jw_mode")
+        bt_rr = st.number_input("R/R", value=1.5, min_value=0.0, step=0.1, key="bt_rr")
+        sl_strategy = st.selectbox("Stop Loss", ['None', 'Full Wick', 'Half Wick'], index=0, key="bt_sl")
+    with col_bt3:
+        bt_jw_percent = st.number_input("JW %", value=20.0, min_value=0.0, step=1.0, key="bt_jw_percent")
+        bt_min_rel_vol = st.number_input("Min rVolume", value=0.9, min_value=0.0, step=0.1, key="bt_min_rel_vol")
+        bt_min_rvolat = st.number_input("Min rVolatility", value=1.0, min_value=0.0, step=0.1, key="bt_min_rvolat")
+
+    bt_progress = st.empty()
+
+    if st.session_state.backtest_results is None:
+        custom_progress(bt_progress, 0, "0%")
+
+    if st.button("Run Backtest", key="run_bt"):
+        with st.spinner("Running backtest..."):
+            df_bt, summary = backtest_engine(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), bt_tickers, bt_jw_mode, sl_strategy, bt_jw_percent, min_avg_vol=5.0, min_rel_vol=bt_min_rel_vol, min_rvolat=bt_min_rvolat, rr=bt_rr)
+            st.session_state.backtest_results = (df_bt, summary)
+        st.rerun()
+
+    if st.session_state.backtest_results is not None:
+        try:
+            df_bt, summary = st.session_state.backtest_results
+        except (ValueError, TypeError):
+            st.error("Invalid backtest results format. Rerun the backtest.")
+            st.session_state.backtest_results = None
+            st.rerun()
+        
+        # Ensure summary has defaults
+        default_keys = {'Total_Signals': 0, 'Win_Rate': 0.0, 'Avg_PnL': 0.0, 'Max_Drawdown': 0.0, 'Sharpe': 0.0}
+        for key, val in default_keys.items():
+            if key not in summary:
+                summary[key] = val
+        
+        if summary['Total_Signals'] == 0:
+            st.info("🔍 No John Wicks identified in the backtest period. Try loosening filters (e.g., lower min rVolume) or extending the date range.")
+        else:
+            # Summary metrics
+            col_sum1, col_sum2, col_sum3, col_sum4 = st.columns(4)
+            with col_sum1:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>Total Signals</h3>
+                    <p style="color: lime; font-size: 20px; font-weight: bold;">{summary['Total_Signals']}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_sum2:
+                color = 'lime' if summary['Win_Rate'] > 50 else '#FF6B6B'
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>Win Rate</h3>
+                    <p style="color: {color}; font-size: 20px; font-weight: bold;">{summary['Win_Rate']}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_sum3:
+                color = 'lime' if summary['Avg_PnL'] > 0 else '#FF6B6B'
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>Avg P&L</h3>
+                    <p style="color: {color}; font-size: 20px; font-weight: bold;">{summary['Avg_PnL']}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_sum4:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>Sharpe Ratio</h3>
+                    <p style="color: lime; font-size: 20px; font-weight: bold;">{summary['Sharpe']}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Table
+            if not df_bt.empty:
+                # Rename columns
+                df_display = df_bt.rename(columns={'Signal_Date': 'Date', 'JW_Percent': 'JW %', 'Mode': 'JW Signal', 'Entry_Close': 'Close Price', 'Days_Held': 'Days Held', 'Outcome': 'Win/Loss', 'PnL_$': 'PnL $', 'PnL_%': 'PnL %', 'TP_Price': 'Take Profit Target Price', 'SL_Price': 'Stop Loss Price'})
+                df_display = df_display.sort_values('Strength', ascending=False)
+                styled_bt = style_df(df_display, minimalist)
+                st.dataframe(styled_bt, use_container_width=True, hide_index=True)
+                
+                csv_bt = df_bt.to_csv(index=False).encode('utf-8')
+                st.download_button("EXPORT BACKTEST CSV", csv_bt, "jw_backtest.csv", "text/csv", key="export_bt")
+
+            # Charts if not minimalist and signals exist
+            if not minimalist and summary['Total_Signals'] > 0 and not df_bt.empty:
+                try:
+                    col_chart1, col_chart2 = st.columns(2)
+                    with col_chart1:
+                        # Avg P&L
+                        if 'PnL_%' in df_bt.columns:
+                            avg_pnl = df_bt['PnL_%'].mean()
+                            fig_pnl = px.bar(x=['PnL'], y=[avg_pnl], title="Avg P&L")
+                            fig_pnl.add_hline(y=0, line_dash="dash", line_color="red")
+                            st.plotly_chart(fig_pnl, use_container_width=True)
+                        else:
+                            st.warning("No PnL data for P&L chart.")
+                    
+                    with col_chart2:
+                        # Win rate by mode
+                        if 'Outcome' in df_bt.columns:
+                            win_by_mode = df_bt.groupby('Mode')['Outcome'].apply(lambda x: (x == 'Win').mean() * 100).reset_index()
+                            win_by_mode.columns = ['Mode', 'Win_Rate_%']
+                            fig_win = px.bar(win_by_mode, x='Mode', y='Win_Rate_%', title="Win Rate by Mode")
+                            st.plotly_chart(fig_win, use_container_width=True)
+                        else:
+                            st.warning("No Outcome data for win rate chart.")
+                except Exception as e:
+                    st.warning(f"Error generating charts: {e}")
