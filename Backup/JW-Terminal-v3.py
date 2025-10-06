@@ -794,14 +794,14 @@ def style_df(df, minimalist):
         subset['30D Avg Vol'] = subset['30D Avg Vol'].apply(lambda v: f"{v/1000000:.2f} M" if isinstance(v, (int, float)) and v > 0 else "0.00 M")
 
     if 'Date' in df.columns:  # backtest mode
-        display_columns = ['Date', 'Ticker', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'JW Signal', 'Strength', 'Days Held', 'Win/Loss', 'PnL $', 'PnL %', 'Take Profit Target Price', 'Stop Loss Price']
+        display_columns = ['Date', 'Ticker', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'JW Signal', 'Strength', 'Num Shares', 'S Balance', 'E Balance', 'Days Held', 'Win/Loss', 'PnL $', 'PnL %', 'Take Profit Target Price', 'Stop Loss Price']
         subset = subset[display_columns]
         # Handle TP and SL columns for display
         if 'Take Profit Target Price' in subset.columns:
             subset['Take Profit Target Price'] = subset['Take Profit Target Price'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else 'N/A')
         if 'Stop Loss Price' in subset.columns:
             subset['Stop Loss Price'] = subset['Stop Loss Price'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else 'N/A')
-        float_cols = ['Open', 'High', 'Low', 'Close', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'Strength', 'PnL $']
+        float_cols = ['Open', 'High', 'Low', 'Close', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'Strength', 'PnL $', 'S Balance', 'E Balance']
     else:  # live scan
         if minimalist:
             jw_col = 'JW Mode'
@@ -822,6 +822,12 @@ def style_df(df, minimalist):
         format_dict['PnL %'] = '{:.1f}%'
     if 'PnL $' in subset.columns:
         format_dict['PnL $'] = '{:.2f}'
+    if 'Date' in df.columns:
+        format_dict['Num Shares'] = '{:.0f}'
+        if 'S Balance' in subset.columns:
+            format_dict['S Balance'] = '{:.2f}'
+        if 'E Balance' in subset.columns:
+            format_dict['E Balance'] = '{:.2f}'
 
     subset = subset.style.format(format_dict)
 
@@ -1059,7 +1065,7 @@ def get_forward_data(full_data, ticker, current_date):
     after = ticker_data[mask]
     return after
 
-def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw_percent=20.0, min_avg_vol=0.1, min_rel_vol=0.9, min_rvolat=1.0, rr=1.5, progress_container=None):
+def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl_percent=0.0, jw_percent=20.0, min_avg_vol=0.1, min_rel_vol=0.9, min_rvolat=1.0, rr=1.5, portfolio_size=100000.0, position_size=10000.0, progress_container=None):
     # Handle tickers: full list or single
     if isinstance(tickers_list, str) and tickers_list == 'Full Cache':
         tickers = st.session_state.default_tickers
@@ -1078,7 +1084,10 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw
             'Avg_PnL': 0.0,
             'Max_Drawdown': 0.0,
             'Sharpe': 0.0,
-            'Avg_Days_Held': 0.0
+            'Avg_Days_Held': 0.0,
+            'Avg_PnL_Dollar': 0.0,
+            'Starting_Portfolio': portfolio_size,
+            'Ending_Portfolio': portfolio_size
         }
         if progress_container:
             custom_progress(progress_container, 1.0, "100% - No data available")
@@ -1123,6 +1132,13 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw
                             else:
                                 wick_size = (entry_h - higher_oc) / 2
                                 sl_price = higher_oc + wick_size
+                        elif sl_strategy == 'Custom':
+                            if sl_percent > 0:
+                                sl_pct = sl_percent / 100
+                                if mode == 'Bullish':
+                                    sl_price = entry_c * (1 - sl_pct)
+                                else:
+                                    sl_price = entry_c * (1 + sl_pct)
                     
                     # Compute TP price
                     tp_price = None
@@ -1169,14 +1185,21 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw
                         outcome = 'Win' if pnl_temp > 0 else 'Loss'
                         hit_day = len(forward_bars)
                     
-                    pnl_dollar = dir * (exit_price - entry_c)
-                    pnl_percent = (pnl_dollar / entry_c) * 100
+                    num_shares = int(round(position_size / entry_c))
+                    s_balance = round(num_shares * entry_c, 2)
+                    pnl_per_share = dir * (exit_price - entry_c)
+                    pnl_dollar = round(num_shares * pnl_per_share, 2)
+                    e_balance = round(s_balance + pnl_dollar, 2)
+                    pnl_percent = (pnl_per_share / entry_c) * 100
                     
                     all_signals.append({
                         'Ticker': ticker,
                         'Signal_Date': date,
                         'Mode': mode,
                         'Entry_Close': entry_c,
+                        'Num_Shares': num_shares,
+                        'S_Balance': s_balance,
+                        'E_Balance': e_balance,
                         'PnL_$': pnl_dollar,
                         'PnL_%': pnl_percent,
                         'Days_Held': hit_day,
@@ -1206,7 +1229,10 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw
         'Avg_PnL': 0.0,
         'Max_Drawdown': 0.0,
         'Sharpe': 0.0,
-        'Avg_Days_Held': 0.0
+        'Avg_Days_Held': 0.0,
+        'Avg_PnL_Dollar': 0.0,
+        'Starting_Portfolio': portfolio_size,
+        'Ending_Portfolio': portfolio_size
     }
     
     if not all_signals:
@@ -1223,6 +1249,8 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw
         sharpe = 0.0
         max_dd = 0.0
         avg_days_held = 0.0
+        avg_pnl_dollar = 0.0
+        ending_portfolio = portfolio_size
     else:
         win_rate = (df_bt['Outcome'] == 'Win').mean() * 100
         pnls = df_bt['PnL_%']
@@ -1231,6 +1259,8 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw
         cum_returns = np.cumsum(pnls - avg_pnl)
         max_dd = np.min(cum_returns) if len(cum_returns) > 0 else 0.0
         avg_days_held = df_bt['Days_Held'].mean()
+        avg_pnl_dollar = df_bt['PnL_$'].mean()
+        ending_portfolio = portfolio_size + df_bt['PnL_$'].sum()
     
     summary = {
         'Total_Signals': len(df_bt),
@@ -1238,7 +1268,10 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, jw
         'Avg_PnL': round(avg_pnl, 2),
         'Max_Drawdown': round(max_dd, 2),
         'Sharpe': round(sharpe, 2),
-        'Avg_Days_Held': round(avg_days_held, 1)
+        'Avg_Days_Held': round(avg_days_held, 1),
+        'Avg_PnL_Dollar': round(avg_pnl_dollar, 2),
+        'Starting_Portfolio': portfolio_size,
+        'Ending_Portfolio': ending_portfolio
     }
     
     print(f"Backtest complete: {len(df_bt)} signals found.")
@@ -1381,12 +1414,17 @@ with tab1:
     with col_bt2:
         bt_jw_mode = st.selectbox("JW Mode", ['All', 'Bullish', 'Bearish'], index=0, key="bt_jw_mode")
         bt_rr = st.number_input("R/R", value=1.5, min_value=0.0, step=0.1, key="bt_rr")
-        sl_strategy = st.selectbox("Stop Loss", ['None', 'Full Wick', 'Half Wick'], index=0, key="bt_sl")
+        sl_strategy = st.selectbox("Stop Loss", ['None', 'Full Wick', 'Half Wick', 'Custom'], index=1, key="bt_sl")
+        bt_sl_percent = 0.0
+        if sl_strategy == 'Custom':
+            bt_sl_percent = st.number_input("Stop Loss %", value=2.0, min_value=0.0, step=0.1, key="bt_sl_percent")
     with col_bt3:
         bt_jw_percent = st.number_input("JW %", value=20.0, min_value=0.0, step=1.0, key="bt_jw_percent")
         bt_min_avg_vol = st.number_input("Min aVolume (M)", value=0.1, min_value=0.0, step=0.1, key="bt_min_avg_vol")
         bt_min_rel_vol = st.number_input("Min rVolume", value=0.9, min_value=0.0, step=0.1, key="bt_min_rel_vol")
         bt_min_rvolat = st.number_input("Min rVolatility", value=1.0, min_value=0.0, step=0.1, key="bt_min_rvolat")
+        bt_portfolio_size = st.number_input("Portfolio Size ($)", value=100000.0, min_value=0.0, step=10000.0, key="bt_portfolio")
+        bt_position_size = st.number_input("Position Size ($)", value=10000.0, min_value=0.0, step=1000.0, key="bt_position")
 
     bt_progress = st.empty()
 
@@ -1395,7 +1433,7 @@ with tab1:
 
     if st.button("Run Backtest", key="run_bt"):
         # Removed st.spinner to eliminate the spinning wheel and text
-        df_bt, summary = backtest_engine(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), bt_tickers, bt_jw_mode, sl_strategy, bt_jw_percent, min_avg_vol=bt_min_avg_vol, min_rel_vol=bt_min_rel_vol, min_rvolat=bt_min_rvolat, rr=bt_rr, progress_container=bt_progress)
+        df_bt, summary = backtest_engine(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), bt_tickers, bt_jw_mode, sl_strategy, bt_sl_percent, bt_jw_percent, min_avg_vol=bt_min_avg_vol, min_rel_vol=bt_min_rel_vol, min_rvolat=bt_min_rvolat, rr=bt_rr, portfolio_size=bt_portfolio_size, position_size=bt_position_size, progress_container=bt_progress)
         st.session_state.backtest_results = (df_bt, summary)
         st.rerun()
 
@@ -1408,7 +1446,7 @@ with tab1:
             st.rerun()
         
         # Ensure summary has defaults
-        default_keys = {'Total_Signals': 0, 'Win_Rate': 0.0, 'Avg_PnL': 0.0, 'Max_Drawdown': 0.0, 'Sharpe': 0.0, 'Avg_Days_Held': 0.0}
+        default_keys = {'Total_Signals': 0, 'Win_Rate': 0.0, 'Avg_PnL': 0.0, 'Max_Drawdown': 0.0, 'Sharpe': 0.0, 'Avg_Days_Held': 0.0, 'Avg_PnL_Dollar': 0.0, 'Starting_Portfolio': bt_portfolio_size, 'Ending_Portfolio': bt_portfolio_size}
         for key, val in default_keys.items():
             if key not in summary:
                 summary[key] = val
@@ -1456,10 +1494,36 @@ with tab1:
                 </div>
                 """, unsafe_allow_html=True)
 
+            # New summary metrics
+            col_new1, col_new2, col_new3 = st.columns(3)
+            with col_new1:
+                color_new1 = 'lime' if summary['Avg_PnL_Dollar'] > 0 else '#FF6B6B'
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>Avg PnL $ / Trade</h3>
+                    <p style="color: {color_new1}; font-size: 20px; font-weight: bold;">${summary['Avg_PnL_Dollar']:.2f}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_new2:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>Starting Portfolio</h3>
+                    <p style="color: lime; font-size: 20px; font-weight: bold;">${summary['Starting_Portfolio']:.2f}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_new3:
+                color_new3 = 'lime' if summary['Ending_Portfolio'] > summary['Starting_Portfolio'] else '#FF6B6B'
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>Ending Portfolio</h3>
+                    <p style="color: {color_new3}; font-size: 20px; font-weight: bold;">${summary['Ending_Portfolio']:.2f}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
             # Table
             if not df_bt.empty:
                 # Rename columns
-                df_display = df_bt.rename(columns={'Signal_Date': 'Date', 'JW_Percent': 'JW %', 'Mode': 'JW Signal', 'Entry_Close': 'Close Price', 'Days_Held': 'Days Held', 'Outcome': 'Win/Loss', 'PnL_$': 'PnL $', 'PnL_%': 'PnL %', 'TP_Price': 'Take Profit Target Price', 'SL_Price': 'Stop Loss Price'})
+                df_display = df_bt.rename(columns={'Signal_Date': 'Date', 'JW_Percent': 'JW %', 'Mode': 'JW Signal', 'Entry_Close': 'Close Price', 'Days_Held': 'Days Held', 'Outcome': 'Win/Loss', 'PnL_$': 'PnL $', 'PnL_%': 'PnL %', 'TP_Price': 'Take Profit Target Price', 'SL_Price': 'Stop Loss Price', 'Num_Shares': 'Num Shares', 'S_Balance': 'S Balance', 'E_Balance': 'E Balance'})
                 df_display = df_display.sort_values('Strength', ascending=False)
                 styled_bt = style_df(df_display, minimalist)
                 st.dataframe(styled_bt, width='stretch', hide_index=True)

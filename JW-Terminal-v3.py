@@ -39,7 +39,7 @@ st.markdown("""
     .stTextInput > div > div > input {
         background-color: black;
         color: lime;
-        border: 1px solid lime;
+        border: 1px solid gray;
         border-radius: 0;
     }
     .stNumberInput > div > div > input {
@@ -199,6 +199,11 @@ st.markdown("""
         padding: 10px;
         text-align: center;
         font-family: 'Courier New', monospace;
+        height: 200px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-evenly;
+        margin-bottom: 10px;
     }
     .stNumberInput input[type=number]::-webkit-outer-spin-button,
     .stNumberInput input[type=number]::-webkit-inner-spin-button {
@@ -207,6 +212,15 @@ st.markdown("""
     }
     .stNumberInput input[type=number] {
         -moz-appearance: textfield;
+    }
+    /* Align selectbox and text input vertically */
+    .stSelectbox > div > div > div {
+        display: flex;
+        align-items: center;
+    }
+    .stTextInput > div > div > div {
+        display: flex;
+        align-items: center;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -794,14 +808,14 @@ def style_df(df, minimalist):
         subset['30D Avg Vol'] = subset['30D Avg Vol'].apply(lambda v: f"{v/1000000:.2f} M" if isinstance(v, (int, float)) and v > 0 else "0.00 M")
 
     if 'Date' in df.columns:  # backtest mode
-        display_columns = ['Date', 'Ticker', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'JW Signal', 'Strength', 'Days Held', 'Win/Loss', 'PnL $', 'PnL %', 'Take Profit Target Price', 'Stop Loss Price']
+        display_columns = ['Date', 'Ticker', 'Close Price', 'rVolume', 'rVolatility', 'SMA', 'JW %', 'JW Signal', 'Strength', 'Num Shares', 'S Balance', 'E Balance', 'Days Held', 'Win/Loss', 'PnL $', 'PnL %', 'Take Profit Target Price', 'Stop Loss Price']
         subset = subset[display_columns]
         # Handle TP and SL columns for display
         if 'Take Profit Target Price' in subset.columns:
             subset['Take Profit Target Price'] = subset['Take Profit Target Price'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else 'N/A')
         if 'Stop Loss Price' in subset.columns:
             subset['Stop Loss Price'] = subset['Stop Loss Price'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else 'N/A')
-        float_cols = ['Open', 'High', 'Low', 'Close', 'Close Price', 'rVolume', 'rVolatility', 'JW %', 'Strength', 'PnL $']
+        float_cols = ['Open', 'High', 'Low', 'Close', 'Close Price', 'rVolume', 'rVolatility', 'SMA', 'JW %', 'Strength', 'PnL $', 'S Balance', 'E Balance']
     else:  # live scan
         if minimalist:
             jw_col = 'JW Mode'
@@ -822,6 +836,12 @@ def style_df(df, minimalist):
         format_dict['PnL %'] = '{:.1f}%'
     if 'PnL $' in subset.columns:
         format_dict['PnL $'] = '{:.2f}'
+    if 'Date' in df.columns:
+        format_dict['Num Shares'] = '{:.0f}'
+        if 'S Balance' in subset.columns:
+            format_dict['S Balance'] = '{:.2f}'
+        if 'E Balance' in subset.columns:
+            format_dict['E Balance'] = '{:.2f}'
 
     subset = subset.style.format(format_dict)
 
@@ -1059,35 +1079,71 @@ def get_forward_data(full_data, ticker, current_date):
     after = ticker_data[mask]
     return after
 
-def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl_percent=0.0, jw_percent=20.0, min_avg_vol=0.1, min_rel_vol=0.9, min_rvolat=1.0, rr=1.5, progress_container=None):
+def calculate_index_return(start_date, end_date, portfolio_size):
+    """
+    New function to estimate index return based on SPY closing prices.
+    """
+    start_dt = pd.to_datetime(start_date)
+    end_dt = pd.to_datetime(end_date)
+    spy_start = (start_dt - timedelta(days=5)).strftime('%Y-%m-%d')  # Buffer for asof
+    spy_end = (end_dt + timedelta(days=5)).strftime('%Y-%m-%d')  # Buffer for end
+    spy_data = yf.download('SPY', start=spy_start, end=spy_end, progress=False, auto_adjust=False)
+    index_return_dollar = 0.0
+    index_return_pct = 0.0
+    if not spy_data.empty:
+        start_close = spy_data['Close'].asof(start_dt)
+        end_close = spy_data['Close'].asof(end_dt)
+        if pd.notna(start_close) and start_close > 0:
+            index_return_pct = ((end_close - start_close) / start_close) * 100
+            index_return_dollar = portfolio_size * (index_return_pct / 100)
+    return round(index_return_dollar, 2), round(index_return_pct, 2)
+
+def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl_percent=0.0, jw_percent=20.0, min_avg_vol=0.1, min_rel_vol=0.9, min_rvolat=1.0, rr=1.5, portfolio_size=100000.0, position_size=10000.0, enable_sma=False, sma_periods=0, progress_container=None):
     # Handle tickers: full list or single
     if isinstance(tickers_list, str) and tickers_list == 'Full Cache':
         tickers = st.session_state.default_tickers
     else:
         tickers = [tickers_list.upper()] if isinstance(tickers_list, str) else tickers_list
 
+    # Compute Index Return using new function
+    index_return_dollar, index_return_pct = calculate_index_return(start_date, end_date, portfolio_size)
+
+    actual_start_date = start_date
+    if enable_sma and sma_periods > 0:
+        actual_start_dt = pd.to_datetime(start_date) - timedelta(days=sma_periods * 1.5)  # Buffer for trading days
+        actual_start_date = actual_start_dt.strftime('%Y-%m-%d')
+
     if progress_container:
         custom_progress(progress_container, 0.0, "Fetching historical data...")
     
-    full_data = fetch_backtest_data(start_date, end_date, tickers_list, progress_container)
+    full_data = fetch_backtest_data(actual_start_date, end_date, tickers_list, progress_container)
     
     if full_data.empty:
         default_summary = {
-            'Total_Signals': 0,
+            'Total_Trades': 0,
             'Win_Rate': 0.0,
             'Avg_PnL': 0.0,
             'Max_Drawdown': 0.0,
             'Sharpe': 0.0,
-            'Avg_Days_Held': 0.0
+            'Avg_Days_Held': 0.0,
+            'Avg_PnL_Dollar': 0.0,
+            'Starting_Portfolio': portfolio_size,
+            'Ending_Portfolio': portfolio_size,
+            'Trading_Days': 0,
+            'Total_PnL_Dollar': 0.0,
+            'Total_PnL_Percent': 0.0,
+            'Index_Return_Dollar': index_return_dollar,
+            'Index_Return_Percent': index_return_pct
         }
         if progress_container:
             custom_progress(progress_container, 1.0, "100% - No data available")
         return pd.DataFrame(), default_summary
     
-    # Use actual data dates/bars only - key fix for no results
-    dates = sorted(full_data.index.unique())
-    
+    # Filter dates to start from original start_date
+    all_dates = sorted(full_data.index.unique())
+    dates = [d for d in all_dates if d.date() >= pd.to_datetime(start_date).date()]
     total_dates = len(dates)
+    
     print(f"Starting backtest on {total_dates} dates from {dates[0].strftime('%Y-%m-%d')} to {dates[-1].strftime('%Y-%m-%d')}.")
 
     all_signals = []
@@ -1108,6 +1164,17 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
                     entry_h = signal['High']
                     entry_l = signal['Low']
                     entry_c = signal['Close']
+                    
+                    # Compute SMA if applicable
+                    sma_val = np.nan
+                    if sma_periods > 0:
+                        ticker_data = full_data[ticker]
+                        mask = (ticker_data.index.date <= date.date())
+                        closes = ticker_data.loc[mask, 'Close'].dropna().tail(sma_periods)
+                        if not closes.empty:
+                            sma_val = closes.mean()
+                        if enable_sma and pd.isna(sma_val):
+                            continue  # Skip this signal if no SMA data
                     
                     # Compute SL price
                     sl_price = None
@@ -1176,14 +1243,21 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
                         outcome = 'Win' if pnl_temp > 0 else 'Loss'
                         hit_day = len(forward_bars)
                     
-                    pnl_dollar = dir * (exit_price - entry_c)
-                    pnl_percent = (pnl_dollar / entry_c) * 100
+                    num_shares = int(round(position_size / entry_c))
+                    s_balance = round(num_shares * entry_c, 2)
+                    pnl_per_share = dir * (exit_price - entry_c)
+                    pnl_dollar = round(num_shares * pnl_per_share, 2)
+                    e_balance = round(s_balance + pnl_dollar, 2)
+                    pnl_percent = (pnl_per_share / entry_c) * 100
                     
                     all_signals.append({
                         'Ticker': ticker,
                         'Signal_Date': date,
                         'Mode': mode,
                         'Entry_Close': entry_c,
+                        'Num_Shares': num_shares,
+                        'S_Balance': s_balance,
+                        'E_Balance': e_balance,
                         'PnL_$': pnl_dollar,
                         'PnL_%': pnl_percent,
                         'Days_Held': hit_day,
@@ -1193,7 +1267,8 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
                         'rVolume': signal['rVolume'],
                         'Strength': signal['Strength'],
                         'JW_Percent': signal['JW %'],
-                        'rVolatility': signal['rVolatility']
+                        'rVolatility': signal['rVolatility'],
+                        'SMA': round(sma_val, 2) if not pd.isna(sma_val) else np.nan
                     })
             else:
                 print(f"No signals found on {date.strftime('%Y-%m-%d')}.")
@@ -1208,12 +1283,20 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
     
     # Always return full summary
     default_summary = {
-        'Total_Signals': 0,
+        'Total_Trades': 0,
         'Win_Rate': 0.0,
         'Avg_PnL': 0.0,
         'Max_Drawdown': 0.0,
         'Sharpe': 0.0,
-        'Avg_Days_Held': 0.0
+        'Avg_Days_Held': 0.0,
+        'Avg_PnL_Dollar': 0.0,
+        'Starting_Portfolio': portfolio_size,
+        'Ending_Portfolio': portfolio_size,
+        'Trading_Days': total_dates,
+        'Total_PnL_Dollar': 0.0,
+        'Total_PnL_Percent': 0.0,
+        'Index_Return_Dollar': index_return_dollar,
+        'Index_Return_Percent': index_return_pct
     }
     
     if not all_signals:
@@ -1230,6 +1313,10 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
         sharpe = 0.0
         max_dd = 0.0
         avg_days_held = 0.0
+        avg_pnl_dollar = 0.0
+        total_pnl_dollar = 0.0
+        total_pnl_percent = 0.0
+        ending_portfolio = portfolio_size
     else:
         win_rate = (df_bt['Outcome'] == 'Win').mean() * 100
         pnls = df_bt['PnL_%']
@@ -1238,14 +1325,26 @@ def backtest_engine(start_date, end_date, tickers_list, jw_mode, sl_strategy, sl
         cum_returns = np.cumsum(pnls - avg_pnl)
         max_dd = np.min(cum_returns) if len(cum_returns) > 0 else 0.0
         avg_days_held = df_bt['Days_Held'].mean()
+        avg_pnl_dollar = df_bt['PnL_$'].mean()
+        total_pnl_dollar = df_bt['PnL_$'].sum()
+        total_pnl_percent = (total_pnl_dollar / portfolio_size) * 100 if portfolio_size > 0 else 0.0
+        ending_portfolio = portfolio_size + total_pnl_dollar
     
     summary = {
-        'Total_Signals': len(df_bt),
+        'Total_Trades': len(df_bt),
         'Win_Rate': round(win_rate, 1),
         'Avg_PnL': round(avg_pnl, 2),
         'Max_Drawdown': round(max_dd, 2),
         'Sharpe': round(sharpe, 2),
-        'Avg_Days_Held': round(avg_days_held, 1)
+        'Avg_Days_Held': round(avg_days_held, 1),
+        'Avg_PnL_Dollar': round(avg_pnl_dollar, 2),
+        'Starting_Portfolio': portfolio_size,
+        'Ending_Portfolio': ending_portfolio,
+        'Trading_Days': total_dates,
+        'Total_PnL_Dollar': round(total_pnl_dollar, 2),
+        'Total_PnL_Percent': round(total_pnl_percent, 2),
+        'Index_Return_Dollar': index_return_dollar,
+        'Index_Return_Percent': index_return_pct
     }
     
     print(f"Backtest complete: {len(df_bt)} signals found.")
@@ -1379,12 +1478,36 @@ with tab1:
         st.session_state.bt_start_date = start_date
         end_date = st.date_input("End Date", value=st.session_state.bt_end_date, min_value=start_date, max_value=datetime.now().date(), key="bt_end")
         st.session_state.bt_end_date = end_date
-        ticker_choice = st.selectbox("Tickers", ['Full Cache', 'Manual'], index=0, key="bt_tickers_choice")
+        col_t1, col_t2 = st.columns([3, 1])
+        with col_t1:
+            ticker_choice = st.selectbox("Tickers", ['Full Cache', 'Manual'], index=0, key="bt_tickers_choice")
+        with col_t2:
+            if ticker_choice == 'Manual':
+                manual_ticker = st.text_input("Manual Ticker", value=st.session_state.get('bt_manual', ''), key="bt_manual")
+            else:
+                manual_ticker = st.text_input("Manual Ticker", value='', key="bt_manual_clear", label_visibility="collapsed")
+                st.session_state.bt_manual = ''
         if ticker_choice == 'Manual':
-            manual_ticker = st.text_input("Enter Ticker", value="AAPL", key="bt_manual")
+            st.markdown("""
+            <style>
+            div[data-testid="column"]:nth-child(2) .stTextInput > div > div > input {
+                border: 1px solid lime !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <style>
+            div[data-testid="column"]:nth-child(2) .stTextInput > div > div > input {
+                border: 1px solid gray !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+        if ticker_choice == 'Manual':
             bt_tickers = manual_ticker
         else:
             bt_tickers = 'Full Cache'
+        bt_portfolio_size = st.number_input("Portfolio Size ($)", value=100000, min_value=0, step=10000, key="bt_portfolio")
     with col_bt2:
         bt_jw_mode = st.selectbox("JW Mode", ['All', 'Bullish', 'Bearish'], index=0, key="bt_jw_mode")
         bt_rr = st.number_input("R/R", value=1.5, min_value=0.0, step=0.1, key="bt_rr")
@@ -1392,11 +1515,17 @@ with tab1:
         bt_sl_percent = 0.0
         if sl_strategy == 'Custom':
             bt_sl_percent = st.number_input("Stop Loss %", value=2.0, min_value=0.0, step=0.1, key="bt_sl_percent")
+        bt_position_size = st.number_input("Position Size ($)", value=10000, min_value=0, step=1000, key="bt_position")
     with col_bt3:
         bt_jw_percent = st.number_input("JW %", value=20.0, min_value=0.0, step=1.0, key="bt_jw_percent")
         bt_min_avg_vol = st.number_input("Min aVolume (M)", value=0.1, min_value=0.0, step=0.1, key="bt_min_avg_vol")
         bt_min_rel_vol = st.number_input("Min rVolume", value=0.9, min_value=0.0, step=0.1, key="bt_min_rel_vol")
         bt_min_rvolat = st.number_input("Min rVolatility", value=1.0, min_value=0.0, step=0.1, key="bt_min_rvolat")
+        enable_sma = st.checkbox("Enable SMA Filter", value=False, key="bt_enable_sma")
+        if enable_sma:
+            sma_periods = st.number_input("SMA Periods", value=20, min_value=1, key="bt_sma_periods")
+        else:
+            sma_periods = 0
 
     bt_progress = st.empty()
 
@@ -1405,7 +1534,7 @@ with tab1:
 
     if st.button("Run Backtest", key="run_bt"):
         # Removed st.spinner to eliminate the spinning wheel and text
-        df_bt, summary = backtest_engine(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), bt_tickers, bt_jw_mode, sl_strategy, bt_sl_percent, bt_jw_percent, min_avg_vol=bt_min_avg_vol, min_rel_vol=bt_min_rel_vol, min_rvolat=bt_min_rvolat, rr=bt_rr, progress_container=bt_progress)
+        df_bt, summary = backtest_engine(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'), bt_tickers, bt_jw_mode, sl_strategy, bt_sl_percent, bt_jw_percent, min_avg_vol=bt_min_avg_vol, min_rel_vol=bt_min_rel_vol, min_rvolat=bt_min_rvolat, rr=bt_rr, portfolio_size=bt_portfolio_size, position_size=bt_position_size, enable_sma=enable_sma, sma_periods=sma_periods, progress_container=bt_progress)
         st.session_state.backtest_results = (df_bt, summary)
         st.rerun()
 
@@ -1417,60 +1546,55 @@ with tab1:
             st.session_state.backtest_results = None
             st.rerun()
         
+        portfolio_size = bt_portfolio_size
         # Ensure summary has defaults
-        default_keys = {'Total_Signals': 0, 'Win_Rate': 0.0, 'Avg_PnL': 0.0, 'Max_Drawdown': 0.0, 'Sharpe': 0.0, 'Avg_Days_Held': 0.0}
+        default_keys = {'Total_Trades': 0, 'Win_Rate': 0.0, 'Avg_PnL': 0.0, 'Max_Drawdown': 0.0, 'Sharpe': 0.0, 'Avg_Days_Held': 0.0, 'Avg_PnL_Dollar': 0.0, 'Starting_Portfolio': portfolio_size, 'Ending_Portfolio': portfolio_size, 'Trading_Days': 0, 'Total_PnL_Dollar': 0.0, 'Total_PnL_Percent': 0.0, 'Index_Return_Dollar': 0.0, 'Index_Return_Percent': 0.0}
         for key, val in default_keys.items():
             if key not in summary:
                 summary[key] = val
         
-        if summary['Total_Signals'] == 0:
+        if summary['Total_Trades'] == 0:
             st.info("🔍 No John Wicks identified in the backtest period. Try loosening filters (e.g., lower min rVolume) or extending the date range.")
         else:
-            # Summary metrics
-            col_sum1, col_sum2, col_sum3, col_sum4, col_sum5 = st.columns(5)
-            with col_sum1:
+            # Combined summary metrics
+            col1, col2, col3 = st.columns(3)
+            with col1:
                 st.markdown(f"""
-                <div class="metric-card">
-                    <h3>Total Signals</h3>
-                    <p style="color: lime; font-size: 20px; font-weight: bold;">{summary['Total_Signals']}</p>
+                <div class="metric-card" style="font-size: 12px;">
+                    <p>Trading days: {summary['Trading_Days']}</p>
+                    <p>Total Trades: {summary['Total_Trades']}</p>
+                    <p>Win Rate: {summary['Win_Rate']}%</p>
                 </div>
                 """, unsafe_allow_html=True)
-            with col_sum2:
-                color = 'lime' if summary['Win_Rate'] > 50 else '#FF6B6B'
+            with col2:
+                total_pnl_d = summary['Total_PnL_Dollar']
+                total_pnl_p = summary['Total_PnL_Percent']
+                color_total = 'lime' if total_pnl_p > 0 else '#FF6B6B'
                 st.markdown(f"""
-                <div class="metric-card">
-                    <h3>Win Rate</h3>
-                    <p style="color: {color}; font-size: 20px; font-weight: bold;">{summary['Win_Rate']}%</p>
+                <div class="metric-card" style="font-size: 12px;">
+                    <p>Start Balance: ${summary['Starting_Portfolio']:.2f}</p>
+                    <p>Portfolio Size: ${summary['Ending_Portfolio']:.2f}</p>
+                    <p style="color: {color_total}; font-weight: bold;">Total PnL: ${total_pnl_d:.2f} ({total_pnl_p:.2f}%)</p>
+                    <p style="color: lime; font-weight: bold;">Index Return: ${summary['Index_Return_Dollar']:.2f} ({summary['Index_Return_Percent']:.2f}%)</p>
                 </div>
                 """, unsafe_allow_html=True)
-            with col_sum3:
-                color = 'lime' if summary['Avg_PnL'] > 0 else '#FF6B6B'
+            with col3:
+                avg_d = summary['Avg_PnL_Dollar']
+                avg_p = summary['Avg_PnL']
+                color_avg = 'lime' if avg_p > 0 else '#FF6B6B'
                 st.markdown(f"""
-                <div class="metric-card">
-                    <h3>Avg P&L</h3>
-                    <p style="color: {color}; font-size: 20px; font-weight: bold;">{summary['Avg_PnL']}%</p>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_sum4:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h3>Sharpe Ratio</h3>
-                    <p style="color: lime; font-size: 20px; font-weight: bold;">{summary['Sharpe']}</p>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_sum5:
-                st.markdown(f"""
-                <div class="metric-card">
-                    <h3>Avg Days Held</h3>
-                    <p style="color: lime; font-size: 20px; font-weight: bold;">{summary['Avg_Days_Held']}</p>
+                <div class="metric-card" style="font-size: 12px;">
+                    <p style="color: {color_avg}; font-weight: bold;">Avg PnL: ${avg_d:.2f} / trade ({avg_p:.2f}%)</p>
+                    <p>Avg Days: {summary['Avg_Days_Held']}</p>
+                    <p>Sharpe Ratio: {summary['Sharpe']}</p>
                 </div>
                 """, unsafe_allow_html=True)
 
             # Table
             if not df_bt.empty:
                 # Rename columns
-                df_display = df_bt.rename(columns={'Signal_Date': 'Date', 'JW_Percent': 'JW %', 'Mode': 'JW Signal', 'Entry_Close': 'Close Price', 'Days_Held': 'Days Held', 'Outcome': 'Win/Loss', 'PnL_$': 'PnL $', 'PnL_%': 'PnL %', 'TP_Price': 'Take Profit Target Price', 'SL_Price': 'Stop Loss Price'})
-                df_display = df_display.sort_values('Strength', ascending=False)
+                df_display = df_bt.rename(columns={'Signal_Date': 'Date', 'JW_Percent': 'JW %', 'Mode': 'JW Signal', 'Entry_Close': 'Close Price', 'Days_Held': 'Days Held', 'Outcome': 'Win/Loss', 'PnL_$': 'PnL $', 'PnL_%': 'PnL %', 'TP_Price': 'Take Profit Target Price', 'SL_Price': 'Stop Loss Price', 'Num_Shares': 'Num Shares', 'S_Balance': 'S Balance', 'E_Balance': 'E Balance'})
+                df_display = df_display.sort_values(['Date', 'Strength'], ascending=[False, False])
                 styled_bt = style_df(df_display, minimalist)
                 st.dataframe(styled_bt, width='stretch', hide_index=True)
                 
@@ -1478,18 +1602,24 @@ with tab1:
                 st.download_button("EXPORT BACKTEST CSV", csv_bt, "jw_backtest.csv", "text/csv", key="export_bt")
 
             # Charts if not minimalist and signals exist
-            if not minimalist and summary['Total_Signals'] > 0 and not df_bt.empty:
+            if not minimalist and summary['Total_Trades'] > 0 and not df_bt.empty:
                 try:
+                    # Compute cumulative balance for chart
+                    df_bt_sorted = df_bt.sort_values('Signal_Date').copy()
+                    df_bt_sorted['Cumulative_PnL'] = df_bt_sorted['PnL_$'].cumsum()
+                    df_bt_sorted['Portfolio_Balance'] = portfolio_size + df_bt_sorted['Cumulative_PnL']
+                    
+                    # Add start point
+                    start_df = pd.DataFrame({
+                        'Signal_Date': [pd.to_datetime(start_date)],
+                        'Portfolio_Balance': [portfolio_size]
+                    })
+                    df_plot = pd.concat([start_df, df_bt_sorted[['Signal_Date', 'Portfolio_Balance']]]).sort_values('Signal_Date').reset_index(drop=True)
+                    
                     col_chart1, col_chart2 = st.columns(2)
                     with col_chart1:
-                        # Avg P&L
-                        if 'PnL_%' in df_bt.columns:
-                            avg_pnl = df_bt['PnL_%'].mean()
-                            fig_pnl = px.bar(x=['PnL'], y=[avg_pnl], title="Avg P&L")
-                            fig_pnl.add_hline(y=0, line_dash="dash", line_color="red")
-                            st.plotly_chart(fig_pnl, use_container_width=True)
-                        else:
-                            st.warning("No PnL data for P&L chart.")
+                        fig_balance = px.line(df_plot, x='Signal_Date', y='Portfolio_Balance', title="Portfolio Balance Over Time")
+                        st.plotly_chart(fig_balance, use_container_width=True)
                     
                     with col_chart2:
                         # Win rate by mode
